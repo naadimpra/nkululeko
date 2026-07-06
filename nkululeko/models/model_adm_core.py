@@ -10,6 +10,7 @@ Modules:
 - PhaseADM       : MLP for phase aggregated features
 - CepstralADM    : MLP for concatenated MFCC/LFCC/CQCC cepstral features
 - CochleagramADM : MLP for cochleagram (auditory model) envelope features
+- PraatADM       : MLP for Praat voice-quality/prosodic features
 """
 
 import torch
@@ -297,6 +298,64 @@ class CochleagramADM(nn.Module):
 
 
 # --------------------------------------------------
+# Praat Artifact Detector (Residual MLP)
+# --------------------------------------------------
+class PraatADM(nn.Module):
+    """
+    Detects voice-quality artifacts using Praat prosodic/formant/
+    jitter/shimmer/pause features (~43 aggregated scalars per utterance,
+    not framewise, so no separate mean/std aggregation is needed).
+
+    Uses LazyLinear for the first layer since the feature count depends
+    on which Praat feature subset is enabled upstream.
+
+    Input:
+        x : (B, P) - Praat feature vector
+    Output:
+        artifact score : (B, 1)
+    """
+
+    def __init__(self, feat_dim=None, hidden_dim=128):
+        super().__init__()
+        self.feat_dim = feat_dim
+        self.hidden_dim = hidden_dim
+
+        self.fc1 = nn.LazyLinear(hidden_dim)
+        self.ln1 = nn.LayerNorm(hidden_dim)
+        self.dropout1 = nn.Dropout(0.2)
+
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.ln2 = nn.LayerNorm(hidden_dim)
+        self.dropout2 = nn.Dropout(0.2)
+
+        self.fc3 = nn.Linear(hidden_dim, hidden_dim // 2)
+        self.ln3 = nn.LayerNorm(hidden_dim // 2)
+        self.dropout3 = nn.Dropout(0.2)
+
+        self.fc_out = nn.Linear(hidden_dim // 2, 1)
+
+    def forward(self, x):
+        # x: (B, P) or (B, P, T) - handle both cases
+        if x.dim() == 3:
+            x = x.squeeze(-1)
+
+        x = F.gelu(self.ln1(self.fc1(x)))
+        x = self.dropout1(x)
+
+        # Residual connection (fc2 preserves hidden_dim)
+        residual = x
+        x = F.gelu(self.ln2(self.fc2(x)))
+        x = self.dropout2(x)
+        x = x + residual
+
+        x = F.gelu(self.ln3(self.fc3(x)))
+        x = self.dropout3(x)
+
+        x = self.fc_out(x)
+        return x
+
+
+# --------------------------------------------------
 # Multi-stream Artifact Detection Model
 # --------------------------------------------------
 class DeepfakeADMModel(nn.Module):
@@ -340,6 +399,7 @@ class DeepfakeADMModel(nn.Module):
         _extra_adm_classes = {
             "cepstral": CepstralADM,
             "cochleagram": CochleagramADM,
+            "praat": PraatADM,
         }
         self.extra_adms = nn.ModuleDict(
             {

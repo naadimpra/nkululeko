@@ -8,6 +8,7 @@ Multi-stream neural model that detects synthesis artifacts using:
 - PhaseADM: phase-dynamics artifacts from STFT features
 - CepstralADM: cepstral-domain artifacts from concatenated MFCC/LFCC/CQCC features
 - CochleagramADM: auditory-model artifacts from cochleagram envelope features
+- PraatADM: voice-quality artifacts from Praat prosodic/formant/jitter/shimmer features
 """
 
 import json
@@ -29,6 +30,59 @@ from nkululeko.optimizers import (
     step_scheduler,
 )
 from nkululeko.reporting.reporter import Reporter
+
+# feats_praat_core.py's ~43 columns have no shared name prefix (unlike
+# mfcc_*/lfcc_*/cqcc_*/cochleagram_*/stft_*), so the "praat" ADM stream is
+# detected by exact (lowercased) column name instead of a prefix check.
+PRAAT_COLUMNS = frozenset(
+    {
+        "duration",
+        "meanf0hz",
+        "stdevf0hz",
+        "hnr",
+        "localjitter",
+        "localabsolutejitter",
+        "rapjitter",
+        "ppq5jitter",
+        "ddpjitter",
+        "localshimmer",
+        "localdbshimmer",
+        "apq3shimmer",
+        "apq5shimmer",
+        "apq11shimmer",
+        "ddashimmer",
+        "f1_mean",
+        "f2_mean",
+        "f3_mean",
+        "f4_mean",
+        "f1_median",
+        "f2_median",
+        "f3_median",
+        "f4_median",
+        "pause_lognorm_mu",
+        "pause_lognorm_sigma",
+        "pause_lognorm_ks_pvalue",
+        "pause_mean_duration",
+        "pause_std_duration",
+        "pause_cv",
+        "nsyll",
+        "npause",
+        "phonationtime_s",
+        "speechrate_nsyll_dur",
+        "articulation_rate_nsyll_phonationtime",
+        "asd_speakingtime_nsyll",
+        "proportion_pause_duration",
+        "jitterpca",
+        "shimmerpca",
+        "pf",
+        "fdisp",
+        "avgformant",
+        "mff",
+        "fitch_vtl",
+        "delta_f",
+        "vtl_delta_f",
+    }
+)
 
 
 class ADMModel(Model):
@@ -140,8 +194,9 @@ class ADMModel(Model):
 
         # Branch selection: time (SSL), spectral (fbank/melspec), phase (STFT),
         # plus optional cepstral streams: lfcc/cqcc individually, or the
-        # combined cepstral branch (MFCC+LFCC+CQCC), plus an optional
-        # cochleagram branch (auditory-model ERB filterbank envelopes).
+        # combined cepstral branch (MFCC+LFCC+CQCC), plus optional cochleagram
+        # (auditory-model ERB filterbank envelopes) and praat (voice-quality/
+        # prosodic) branches.
         branches_str = self.util.config_val(
             "MODEL", "adm.branches", "time,spectral,phase,lfcc,cqcc"
         )
@@ -154,6 +209,7 @@ class ADMModel(Model):
             "cqcc",
             "cepstral",
             "cochleagram",
+            "praat",
         }
         unknown_branches = [b for b in raw_branches if b not in supported_branches]
         if unknown_branches:
@@ -167,7 +223,7 @@ class ADMModel(Model):
             raise ValueError(
                 "No valid ADM branches configured. "
                 "Please set [MODEL] adm.branches to a non-empty subset of "
-                "{'time','spectral','phase','lfcc','cqcc','cepstral','cochleagram'}."
+                "{'time','spectral','phase','lfcc','cqcc','cepstral','cochleagram','praat'}."
             )
         self.branches = branches
         self.util.debug(f"ADM active branches: {branches}")
@@ -314,6 +370,10 @@ class ADMModel(Model):
         consume all three classical cepstral feature families. The
         "cochleagram" extra stream carries auditory-model (ERB
         filterbank) envelope features for the CochleagramADM branch.
+        The "praat" extra stream carries voice-quality/prosodic features
+        (jitter, shimmer, formants, pause statistics, ...) for the
+        PraatADM branch, matched by exact name since those columns have
+        no shared prefix.
         """
         acoustic_cols = [c for c in columns if isinstance(c, str)]
         spectral_indices = []
@@ -323,6 +383,7 @@ class ADMModel(Model):
             "cqcc": [],
             "cepstral": [],
             "cochleagram": [],
+            "praat": [],
         }
         for i, col in enumerate(acoustic_cols):
             col_idx = ssl_feat_dim + i
@@ -339,6 +400,8 @@ class ADMModel(Model):
                 extra_indices["cochleagram"].append(col_idx)
             elif col_name.startswith("stft"):
                 phase_indices.append(col_idx)
+            elif col_name in PRAAT_COLUMNS:
+                extra_indices["praat"].append(col_idx)
             else:
                 spectral_indices.append(col_idx)
         return spectral_indices, phase_indices, extra_indices
@@ -346,7 +409,7 @@ class ADMModel(Model):
     def _active_branches(self, branches):
         """Drop optional extra branches that have no corresponding features."""
         active = []
-        extra_branch_names = ("lfcc", "cqcc", "cepstral", "cochleagram")
+        extra_branch_names = ("lfcc", "cqcc", "cepstral", "cochleagram", "praat")
         has_extra_streams = any(
             self.extra_stream_indices.get(name) for name in extra_branch_names
         )
